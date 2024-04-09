@@ -2,6 +2,9 @@ import torch.nn as nn
 import torch
 import torch.optim as optim
 import torchvision.utils as vutils
+import numpy as np
+from matplotlib import pyplot as plt
+from tqdm.auto import tqdm
 
 from GAN.dataset import PokemonDataset
 from GAN.discriminator import Discriminator
@@ -9,9 +12,15 @@ from GAN.generator import Generator
 from torch.utils.data import DataLoader
 
 
+def get_infinite_batches(data_loader):
+    while True:
+        for i, (images, _) in enumerate(data_loader):
+            yield images
+
+
 def weights_init(m):
     classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
+    if classname.find('Conv') != -1 and classname != "ConvTranspose2DBlock":
         nn.init.normal_(m.weight.data, 0.0, 0.02)
     elif classname.find('BatchNorm') != -1:
         nn.init.normal_(m.weight.data, 1.0, 0.02)
@@ -19,104 +28,110 @@ def weights_init(m):
 
 
 if __name__ == '__main__':
-    device = torch.device("cpu")
+    device = torch.device("cuda")
     noise_size = 100
     feature_map_size = 96
     image_size = 96
 
     netG = Generator(noise_size, feature_map_size).to(device)
-    netG.apply(weights_init)
+    # netG.apply(weights_init)
 
     netD = Discriminator(noise_size, feature_map_size).to(device)
-    netD.apply(weights_init)
+    # netD.apply(weights_init)
 
     criterion = nn.BCELoss()
 
-    fixed_noise = torch.randn(64, noise_size, 1, 1, device=device)
-
     real_label = 0.9
     fake_label = 0.1
-
+    batch_size = 16
     lr = 0.0002
     beta1 = 0.5
-    optimizerD = optim.Adam(netD.parameters(), lr=lr, betas=(beta1, 0.999))
+    optimizerD = optim.Adam(netD.parameters(), lr=lr, betas=(beta1, 0.999), weight_decay=1e-4)
     optimizerG = optim.Adam(netG.parameters(), lr=lr, betas=(beta1, 0.999))
     # Training Loop
-    num_epochs = 10
+    num_epochs = 500
     # Lists to keep track of progress
-    img_list = []
-    G_losses = []
-    D_losses = []
-    iters = 0
     dataset = PokemonDataset("sprites/sprites/pokemon")
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
-    print("Starting Training Loop...")
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     for epoch in range(num_epochs):
-        for i, data in enumerate(dataloader, 0):
+        progress_bar = tqdm(total=len(dataloader),
+                            desc=f"Epoch: {epoch} Loss Discriminator: Loss Generator: ",
+                            # position=0,
+                            # leave=True
+                            )
+        curr_g_losses = []
+        curr_d_losses = []
+        n_critic = 5
+        epochs = 500
+        for data in dataloader:
             ############################
             # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
             ###########################
-            ## Train with all-real batch
             netD.zero_grad()
-            # Format batch
-            real_cpu = data.to(device)
-            b_size = real_cpu.size(0)
-            label = torch.full((b_size,), real_label, dtype=torch.float, device=device)
-            # Forward pass real batch through D
-            output = netD(real_cpu).view(-1)
-            # Calculate loss on all-real batch
-            errD_real = criterion(output, label)
-            # Calculate gradients for D in backward pass
-            errD_real.backward()
-            D_x = output.mean().item()
-
-            ## Train with all-fake batch
-            # Generate batch of latent vectors
-            noise = torch.randn(b_size, noise_size, 1, 1, device=device)
+            real_data = data.to(device)
+            label_real = torch.full((batch_size,), real_label, dtype=torch.float, device=device)
+            noise = torch.randn(batch_size, noise_size, 1, 1, device=device)
             # Generate fake image batch with G
-            fake = netG(noise)
-            label.fill_(fake_label)
-            # Classify all fake batch with D
-            output = netD(fake.detach()).view(-1)
-            # Calculate D's loss on the all-fake batch
-            errD_fake = criterion(output, label)
-            # Calculate the gradients for this batch, accumulated (summed) with previous gradients
-            errD_fake.backward()
-            D_G_z1 = output.mean().item()
-            # Compute error of D as sum over the fake and the real batches
-            errD = errD_real + errD_fake
-            # Update D
+            fake_data = netG(noise).detach()
+            labels_fake = torch.full((batch_size,), fake_label, dtype=torch.float, device=device)
+            both_data = torch.concatenate((real_data, fake_data))
+            both_labels = torch.concatenate((label_real, labels_fake))
+
+            output = netD(both_data).view(-1)
+            errD = criterion(output, both_labels)
+            errD.backward()
             optimizerD.step()
 
             ############################
             # (2) Update G network: maximize log(D(G(z)))
             ###########################
+            new_noise = torch.randn(batch_size, noise_size, 1, 1, device=device)
+            new_fake_data = netG(new_noise)
             netG.zero_grad()
-            label.fill_(real_label)  # fake labels are real for generator cost
             # Since we just updated D, perform another forward pass of all-fake batch through D
-            output = netD(fake).view(-1)
+            output = netD(new_fake_data).view(-1)
             # Calculate G's loss based on this output
-            errG = criterion(output, label)
+            errG = criterion(output, label_real)
             # Calculate gradients for G
             errG.backward()
-            D_G_z2 = output.mean().item()
             # Update G
             optimizerG.step()
 
-            # Output training stats
-            if i % 50 == 0:
-                print('[%d/%d][%d/%d]\tLoss_D: %.4f\tLoss_G: %.4f\tD(x): %.4f\tD(G(z)): %.4f / %.4f'
-                      % (epoch, num_epochs, i, len(dataloader),
-                         errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
+            curr_g_losses.append(errG.item())
+            curr_d_losses.append(errD.item())
 
-            # Save Losses for plotting later
-            G_losses.append(errG.item())
-            D_losses.append(errD.item())
+            mean_g_loss = np.mean(curr_g_losses)
+            mean_d_loss = np.mean(curr_d_losses)
+            progress_bar.set_description(
+                f"Epoch: {epoch} Loss Generator: {mean_g_loss:.3f} Loss Discriminator: {mean_d_loss:.3f}")
 
-            # Check how the generator is doing by saving G's output on fixed_noise
-            if (iters % 500 == 0) or ((epoch == num_epochs - 1) and (i == len(dataloader) - 1)):
-                with torch.no_grad():
-                    fake = netG(fixed_noise).detach().cpu()
-                img_list.append(vutils.make_grid(fake, padding=2, normalize=True))
+            progress_bar.update(1)
+        if epoch % 50 == 0 and epoch > 0:
+            torch.save({
+                'epoch': epoch,
+                'generator_state_dict': netG.state_dict(),
+                'discriminator_state_dict': netD.state_dict(),
+                'optimizerD_state_dict': optimizerD.state_dict(),
+                'optimizerG_state_dict': optimizerG.state_dict()
+            }, f'checkpoint_{epoch}.pth')
 
-            iters += 1
+    # model = YourModel()
+
+    # Instantiate Adam optimizer
+    # optimizer = optim.Adam(netG.parameters(), lr=0.001)
+
+    # Load model and optimizer
+    # checkpoint = torch.load('checkpoint.pth')
+    # netG.load_state_dict(checkpoint['generator_state_dict'])
+    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    # epoch = checkpoint['epoch']
+    # noise = torch.randn(16, noise_size, 1, 1, device=device)
+    # output = netG(noise).detach().cpu()
+    # image_array = ((output.permute(0, 2, 3, 1).numpy() + 1) * 128).astype(np.uint8)
+    # plt.plot([1],[1])
+    # plt.show()
+    # plt.figure(figsize=(8, 8))
+    # plt.axis("off")
+    # plt.title("Training Images")
+    # plt.imshow(np.transpose(vutils.make_grid(output[:16], padding=2, normalize=True), (1, 2, 0)))
+    # plt.show()

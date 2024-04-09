@@ -25,10 +25,11 @@ class Discriminator(nn.Module):
         )
         self.flatten = nn.Flatten()
         self.linear = nn.LazyLinear(1)
-        self.sigmoid = nn.Sigmoid()
+        # self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         x = self.main(x)
+        x = self.flatten(x)
         x = self.linear(x)
-        x = self.sigmoid(x)
+        # x = self.sigmoid(x)
         return x
