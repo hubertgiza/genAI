@@ -1,137 +1,135 @@
-import torch.nn as nn
+import math
+
 import torch
 import torch.optim as optim
 import torchvision.utils as vutils
 import numpy as np
-from matplotlib import pyplot as plt
-from tqdm.auto import tqdm
+import os
+import torch.autograd as autograd
 
+from matplotlib import pyplot as plt
 from GAN.dataset import PokemonDataset
 from GAN.discriminator import Discriminator
 from GAN.generator import Generator
 from torch.utils.data import DataLoader
+from torchvision import transforms
+
+LAMBDA = 10  # Gradient penalty lambda coefficient
+
+fixed_noise = torch.randn(64, 100, 1, 1, device=torch.device("cuda"), dtype=torch.float)
+samples_path = os.path.join('./samples', "pokemon")
+
+
+def generate_imgs(netG, epoch):
+    netG.eval()
+    fake_imgs = netG(fixed_noise)
+    fake_imgs_ = vutils.make_grid(fake_imgs, normalize=True, nrow=math.ceil(fixed_noise.shape[0] ** 0.5))
+    vutils.save_image(fake_imgs_, os.path.join(samples_path, 'sample_' + str(epoch) + '.png'))
+    netG.train()
 
 
 def get_infinite_batches(data_loader):
     while True:
-        for i, (images, _) in enumerate(data_loader):
+        for images in data_loader:
             yield images
 
 
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1 and classname != "ConvTranspose2DBlock":
-        nn.init.normal_(m.weight.data, 0.0, 0.02)
-    elif classname.find('BatchNorm') != -1:
-        nn.init.normal_(m.weight.data, 1.0, 0.02)
-        nn.init.constant_(m.bias.data, 0)
+def calc_gradient_penalty(netD, real_data: torch.Tensor, fake_data: torch.Tensor):
+    m = real_data.shape[0]
+    epsilon = torch.rand(m, 1, 1, 1).to(device)
+
+    interpolates = epsilon * real_data + ((1 - epsilon) * fake_data)
+    disc_interpolates = netD(interpolates)
+    gradients = autograd.grad(outputs=disc_interpolates,
+                              inputs=interpolates,
+                              grad_outputs=torch.ones(disc_interpolates.size()).cuda(),
+                              create_graph=True,
+                              retain_graph=True)[0]
+    gradients = gradients.reshape((m, -1))
+    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * LAMBDA
+    return gradient_penalty
+
+
+def create_checkpoint(directory_path: str, file_name: str, checkpoint_dict: dict):
+    path = os.path.join(directory_path, file_name)
+    os.makedirs(directory_path, exist_ok=True)
+    torch.save(checkpoint_dict, path)
 
 
 if __name__ == '__main__':
     device = torch.device("cuda")
     noise_size = 100
-    feature_map_size = 96
-    image_size = 96
+    feature_map_size = 64
+    image_size = 64
 
     netG = Generator(noise_size, feature_map_size).to(device)
-    # netG.apply(weights_init)
+    netD = Discriminator(3, feature_map_size).to(device)
 
-    netD = Discriminator(noise_size, feature_map_size).to(device)
-    # netD.apply(weights_init)
+    lr = 0.0001
+    betas = (0.0, 0.9)
+    weight_decay = 2e-5
+    optimizerD = optim.Adam(netD.parameters(), lr=lr, betas=betas, weight_decay=weight_decay)
+    optimizerG = optim.Adam(netG.parameters(), lr=lr, betas=betas, weight_decay=weight_decay)
 
-    criterion = nn.BCELoss()
-
-    real_label = 0.9
-    fake_label = 0.1
-    batch_size = 16
-    lr = 0.0002
-    beta1 = 0.5
-    optimizerD = optim.Adam(netD.parameters(), lr=lr, betas=(beta1, 0.999), weight_decay=1e-4)
-    optimizerG = optim.Adam(netG.parameters(), lr=lr, betas=(beta1, 0.999))
-    # Training Loop
-    num_epochs = 500
-    # Lists to keep track of progress
-    dataset = PokemonDataset("sprites/sprites/pokemon")
+    batch_size = 64
+    data_transform = transforms.Compose([
+        transforms.Resize(64),
+        transforms.CenterCrop(64),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])
+    dataset = PokemonDataset("sprites/sprites/pokemon", data_transform)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    for epoch in range(num_epochs):
-        progress_bar = tqdm(total=len(dataloader),
-                            desc=f"Epoch: {epoch} Loss Discriminator: Loss Generator: ",
-                            # position=0,
-                            # leave=True
-                            )
-        curr_g_losses = []
-        curr_d_losses = []
-        n_critic = 5
-        epochs = 500
-        for data in dataloader:
-            ############################
-            # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
-            ###########################
-            netD.zero_grad()
-            real_data = data.to(device)
-            label_real = torch.full((batch_size,), real_label, dtype=torch.float, device=device)
-            noise = torch.randn(batch_size, noise_size, 1, 1, device=device)
-            # Generate fake image batch with G
-            fake_data = netG(noise).detach()
-            labels_fake = torch.full((batch_size,), fake_label, dtype=torch.float, device=device)
-            both_data = torch.concatenate((real_data, fake_data))
-            both_labels = torch.concatenate((label_real, labels_fake))
+    infinite_dataloader = get_infinite_batches(dataloader)
 
-            output = netD(both_data).view(-1)
-            errD = criterion(output, both_labels)
-            errD.backward()
+    num_epochs = 50000
+    n_critic = 5
+    for epoch in range(num_epochs):
+        ############################
+        # (1) Train Discriminator(critic) n_critic times
+        ###########################
+        for iter_critic in range(n_critic):
+            real_data = next(infinite_dataloader).to(device)
+            if real_data.size()[0] != batch_size:
+                continue
+
+            netD.zero_grad()
+            noise = torch.randn(batch_size, noise_size, 1, 1, dtype=torch.float, device=device)
+            fake_data = netG(noise)
+
+            error_fake = netD(fake_data.detach()).mean()
+            error_real = netD(real_data.detach()).mean()
+            gradient_penalty = calc_gradient_penalty(netD, real_data, fake_data)
+            d_loss = -(error_real - error_fake) + gradient_penalty
+
+            d_loss.backward()
             optimizerD.step()
 
-            ############################
-            # (2) Update G network: maximize log(D(G(z)))
-            ###########################
-            new_noise = torch.randn(batch_size, noise_size, 1, 1, device=device)
-            new_fake_data = netG(new_noise)
-            netG.zero_grad()
-            # Since we just updated D, perform another forward pass of all-fake batch through D
-            output = netD(new_fake_data).view(-1)
-            # Calculate G's loss based on this output
-            errG = criterion(output, label_real)
-            # Calculate gradients for G
-            errG.backward()
-            # Update G
-            optimizerG.step()
+        ############################
+        # (2) Train Generator once
+        ###########################
+        netG.zero_grad()
+        noise = torch.randn(batch_size, noise_size, 1, 1, dtype=torch.float, device=device)
+        fake_data = netG(noise)
 
-            curr_g_losses.append(errG.item())
-            curr_d_losses.append(errD.item())
+        error_fake = netD(fake_data).mean()
+        g_loss = - error_fake
+        g_loss.backward()
+        optimizerG.step()
 
-            mean_g_loss = np.mean(curr_g_losses)
-            mean_d_loss = np.mean(curr_d_losses)
-            progress_bar.set_description(
-                f"Epoch: {epoch} Loss Generator: {mean_g_loss:.3f} Loss Discriminator: {mean_d_loss:.3f}")
-
-            progress_bar.update(1)
-        if epoch % 50 == 0 and epoch > 0:
-            torch.save({
+        print(f"Epoch: {epoch}",
+              f" Critic loss: {d_loss.item()}",
+              f" Generator loss: {g_loss.item()}",
+              )
+        if epoch % 200 == 0:
+            directory_name = f"checkpoints/checkpoint_{epoch}"
+            filename = "checkpoint.pth"
+            checkpoint_dict = {
                 'epoch': epoch,
                 'generator_state_dict': netG.state_dict(),
                 'discriminator_state_dict': netD.state_dict(),
                 'optimizerD_state_dict': optimizerD.state_dict(),
                 'optimizerG_state_dict': optimizerG.state_dict()
-            }, f'checkpoint_{epoch}.pth')
-
-    # model = YourModel()
-
-    # Instantiate Adam optimizer
-    # optimizer = optim.Adam(netG.parameters(), lr=0.001)
-
-    # Load model and optimizer
-    # checkpoint = torch.load('checkpoint.pth')
-    # netG.load_state_dict(checkpoint['generator_state_dict'])
-    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    # epoch = checkpoint['epoch']
-    # noise = torch.randn(16, noise_size, 1, 1, device=device)
-    # output = netG(noise).detach().cpu()
-    # image_array = ((output.permute(0, 2, 3, 1).numpy() + 1) * 128).astype(np.uint8)
-    # plt.plot([1],[1])
-    # plt.show()
-    # plt.figure(figsize=(8, 8))
-    # plt.axis("off")
-    # plt.title("Training Images")
-    # plt.imshow(np.transpose(vutils.make_grid(output[:16], padding=2, normalize=True), (1, 2, 0)))
-    # plt.show()
+            }
+            create_checkpoint(directory_name, filename, checkpoint_dict)
+            generate_imgs(netG, epoch)

@@ -2,7 +2,7 @@ import os
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import PIL
-from torchvision import transforms
+
 import cv2
 import torch
 import matplotlib.pyplot as plt
@@ -11,13 +11,7 @@ import torchvision.utils as vutils
 
 
 class PokemonDataset(Dataset):
-    def __init__(self, root_path: str):
-        transform = transforms.Compose([
-            transforms.Resize(96),
-            transforms.CenterCrop(96),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ])
+    def __init__(self, root_path: str, transform):
         available_images = list(filter(lambda x: x.endswith(".png"), os.listdir(root_path)))
         self.images = []
         self.images2 = []
