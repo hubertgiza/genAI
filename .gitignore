@@ -1,3 +1,4 @@
 .idea
 /WGAN/sprites/
-/GAN
+/WGAN/checkpoints
+/WGAN/samples
