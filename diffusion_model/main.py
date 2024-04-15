@@ -23,7 +23,9 @@ def sampling(model):
     model.eval()
     with torch.no_grad():
         for t in range(T - 1, 0, -1):
-            z = torch.randn(samples_shape, dtype=torch.float, device=device) if t > 1 else torch.zeros(samples_shape, dtype=torch.float, device=device)
+            z = torch.randn(samples_shape, dtype=torch.float, device=device) if t > 1 else torch.zeros(samples_shape,
+                                                                                                       dtype=torch.float,
+                                                                                                       device=device)
             t_vector = torch.ones((samples_shape[0]), dtype=torch.int, device=device) * t
             prediction_scale = (1 - alpha[t]) / (torch.sqrt(1 - model.alpha_dash[t]))
             x_next = (1 / torch.sqrt(alpha[t])) * (x_prev - prediction_scale * model(x_prev, t_vector)[0]) + torch.sqrt(
@@ -40,27 +42,26 @@ def validate(path_to_model):
 
 
 if __name__ == '__main__':
-    validate("model_900.pth")
-    # model = DiffusionModel(T).to(device)
-    # train_dataset = PointsDataset("bicycle.txt")
-    # train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True)
-    #
-    # n_epochs = 1000
-    # criterion = torch.nn.MSELoss()
-    # optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
-    # model.train()
-    # for epoch in range(n_epochs):
-    #     running_loss = 0
-    #     for x_0_batch in tqdm(train_dataloader):
-    #         x_0_batch = x_0_batch.to(device)
-    #         number_of_samples = x_0_batch.shape[0]
-    #         t = torch.randint(low=1, high=T, size=(number_of_samples,)).int()
-    #         pred_epsilon, epsilon = model(x_0_batch, t)
-    #         loss = criterion(pred_epsilon, epsilon)
-    #         optimizer.zero_grad()
-    #         loss.backward()
-    #         optimizer.step()
-    #         running_loss += loss.item()
-    #     if epoch % 100 == 0:
-    #         torch.save(model, f"model_{epoch}.pth")
-    #     print(f"Step: {epoch}/{n_epochs}, loss: {running_loss / len(train_dataloader)}")
+    model = DiffusionModel(T).to(device)
+    train_dataset = PointsDataset("bicycle.txt")
+    train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True)
+
+    n_epochs = 1000
+    criterion = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+    model.train()
+    for epoch in range(n_epochs):
+        running_loss = 0
+        for x_0_batch in tqdm(train_dataloader):
+            x_0_batch = x_0_batch.to(device)
+            number_of_samples = x_0_batch.shape[0]
+            t = torch.randint(low=1, high=T, size=(number_of_samples,)).int()
+            pred_epsilon, epsilon = model(x_0_batch, t)
+            loss = criterion(pred_epsilon, epsilon)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+        if epoch % 100 == 0:
+            torch.save(model, f"model_{epoch}.pth")
+        print(f"Step: {epoch}/{n_epochs}, loss: {running_loss / len(train_dataloader)}")
